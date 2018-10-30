@@ -6,6 +6,7 @@ import random
 
 # Import Salt Testing libs
 from tests.support.case import ModuleCase
+from tests.support.helpers import flaky
 from tests.support.unit import skipIf
 
 # Import Salt libs
@@ -18,6 +19,7 @@ class StatusModuleTest(ModuleCase):
     Test the status module
     '''
     @skipIf(salt.utils.platform.is_windows(), 'minion is windows')
+    @flaky
     def test_status_pid(self):
         '''
         status.pid
@@ -49,7 +51,9 @@ class StatusModuleTest(ModuleCase):
         status.diskusage
         '''
         ret = self.run_function('status.diskusage')
-        if salt.utils.platform.is_windows():
+        if salt.utils.platform.is_darwin():
+            self.assertIn('not yet supported on this platform', ret)
+        elif salt.utils.platform.is_windows():
             self.assertTrue(isinstance(ret['percent'], float))
         else:
             self.assertIn('total', str(ret))

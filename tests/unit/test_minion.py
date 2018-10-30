@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 '''
-    :codeauthor: :email:`Mike Place <mp@saltstack.com>`
+    :codeauthor: Mike Place <mp@saltstack.com>
 '''
 
 # Import python libs
@@ -11,20 +11,23 @@ import os
 # Import Salt Testing libs
 from tests.support.unit import TestCase, skipIf
 from tests.support.mock import NO_MOCK, NO_MOCK_REASON, patch, MagicMock
+from tests.support.mixins import AdaptedConfigurationTestCaseMixin
 from tests.support.helpers import skip_if_not_root
 # Import salt libs
 import salt.minion
 import salt.utils.event as event
-from salt.exceptions import SaltSystemExit
+from salt.exceptions import SaltSystemExit, SaltMasterUnresolvableError
 import salt.syspaths
 import tornado
+import tornado.testing
 from salt.ext.six.moves import range
+
 
 __opts__ = {}
 
 
 @skipIf(NO_MOCK, NO_MOCK_REASON)
-class MinionTestCase(TestCase):
+class MinionTestCase(TestCase, AdaptedConfigurationTestCaseMixin):
     def test_invalid_master_address(self):
         with patch.dict(__opts__, {'ipv6': False, 'master': float('127.0'), 'master_port': '4555', 'retry_dns': False}):
             self.assertRaises(SaltSystemExit, salt.minion.resolve_dns, __opts__)
@@ -100,33 +103,6 @@ class MinionTestCase(TestCase):
                                                          'master_uri': 'tcp://127.0.0.1:4555',
                                                          'source_ip': '111.1.0.1',
                                                          'master_ip': '127.0.0.1'}
-
-    @skip_if_not_root
-    def test_sock_path_len(self):
-        '''
-        This tests whether or not a larger hash causes the sock path to exceed
-        the system's max sock path length. See the below link for more
-        information.
-
-        https://github.com/saltstack/salt/issues/12172#issuecomment-43903643
-        '''
-        opts = {
-            'id': 'salt-testing',
-            'hash_type': 'sha512',
-            'sock_dir': os.path.join(salt.syspaths.SOCK_DIR, 'minion'),
-            'extension_modules': ''
-        }
-        with patch.dict(__opts__, opts):
-            try:
-                event_publisher = event.AsyncEventPublisher(__opts__)
-                result = True
-            except ValueError:
-                #  There are rare cases where we operate a closed socket, especially in containers.
-                # In this case, don't fail the test because we'll catch it down the road.
-                result = True
-            except SaltSystemExit:
-                result = False
-        self.assertTrue(result)
 
     # Tests for _handle_decoded_payload in the salt.minion.Minion() class: 3
 
@@ -229,10 +205,10 @@ class MinionTestCase(TestCase):
             try:
 
                 # mock gen.sleep to throw a special Exception when called, so that we detect it
-                class SleepCalledEception(Exception):
+                class SleepCalledException(Exception):
                     """Thrown when sleep is called"""
                     pass
-                tornado.gen.sleep.return_value.set_exception(SleepCalledEception())
+                tornado.gen.sleep.return_value.set_exception(SleepCalledException())
 
                 # up until process_count_max: gen.sleep does not get called, processes are started normally
                 for i in range(process_count_max):
@@ -247,7 +223,7 @@ class MinionTestCase(TestCase):
                 mock_data = {'fun': 'foo.bar',
                              'jid': process_count_max + 1}
 
-                self.assertRaises(SleepCalledEception,
+                self.assertRaises(SleepCalledException,
                                   lambda: io_loop.run_sync(lambda: minion._handle_decoded_payload(mock_data)))
                 self.assertEqual(salt.utils.process.SignalHandlingMultiprocessingProcess.start.call_count,
                                  process_count_max)
@@ -263,9 +239,11 @@ class MinionTestCase(TestCase):
                 patch('salt.minion.Minion.sync_connect_master', MagicMock(side_effect=RuntimeError('stop execution'))), \
                 patch('salt.utils.process.SignalHandlingMultiprocessingProcess.start', MagicMock(return_value=True)), \
                 patch('salt.utils.process.SignalHandlingMultiprocessingProcess.join', MagicMock(return_value=True)):
-            mock_opts = copy.copy(salt.config.DEFAULT_MINION_OPTS)
+            mock_opts = self.get_config('minion', from_scratch=True)
             mock_opts['beacons_before_connect'] = True
-            minion = salt.minion.Minion(mock_opts, io_loop=tornado.ioloop.IOLoop())
+            io_loop = tornado.ioloop.IOLoop()
+            io_loop.make_current()
+            minion = salt.minion.Minion(mock_opts, io_loop=io_loop)
             try:
 
                 try:
@@ -287,9 +265,11 @@ class MinionTestCase(TestCase):
                 patch('salt.minion.Minion.sync_connect_master', MagicMock(side_effect=RuntimeError('stop execution'))), \
                 patch('salt.utils.process.SignalHandlingMultiprocessingProcess.start', MagicMock(return_value=True)), \
                 patch('salt.utils.process.SignalHandlingMultiprocessingProcess.join', MagicMock(return_value=True)):
-            mock_opts = copy.copy(salt.config.DEFAULT_MINION_OPTS)
+            mock_opts = self.get_config('minion', from_scratch=True)
             mock_opts['scheduler_before_connect'] = True
-            minion = salt.minion.Minion(mock_opts, io_loop=tornado.ioloop.IOLoop())
+            io_loop = tornado.ioloop.IOLoop()
+            io_loop.make_current()
+            minion = salt.minion.Minion(mock_opts, io_loop=io_loop)
             try:
                 try:
                     minion.tune_in(start=True)
@@ -301,3 +281,69 @@ class MinionTestCase(TestCase):
                 self.assertTrue('beacons' not in minion.periodic_callbacks)
             finally:
                 minion.destroy()
+
+    def test_valid_ipv4_master_address_ipv6_enabled(self):
+        '''
+        Tests that the 'scheduler_before_connect' option causes the scheduler to be initialized before connect.
+        '''
+        interfaces = {'bond0.1234': {'hwaddr': '01:01:01:d0:d0:d0',
+                                     'up': False, 'inet':
+                                     [{'broadcast': '111.1.111.255',
+                                       'netmask': '111.1.0.0',
+                                       'label': 'bond0',
+                                       'address': '111.1.0.1'}]}}
+        with patch.dict(__opts__, {'ipv6': True, 'master': '127.0.0.1',
+                                   'master_port': '4555', 'retry_dns': False,
+                                   'source_address': '111.1.0.1',
+                                   'source_interface_name': 'bond0.1234',
+                                   'source_ret_port': 49017,
+                                   'source_publish_port': 49018}), \
+            patch('salt.utils.network.interfaces',
+                  MagicMock(return_value=interfaces)):
+            expected = {'source_publish_port': 49018,
+                        'master_uri': 'tcp://127.0.0.1:4555',
+                        'source_ret_port': 49017,
+                        'master_ip': '127.0.0.1'}
+            assert salt.minion.resolve_dns(__opts__) == expected
+
+    def test_minion_retry_dns_count(self):
+        '''
+        Tests that the resolve_dns will retry dns look ups for a maximum of
+        3 times before raising a SaltMasterUnresolvableError exception.
+        '''
+        with patch.dict(__opts__, {'ipv6': False, 'master': 'dummy',
+                                   'master_port': '4555',
+                                   'retry_dns': 1, 'retry_dns_count': 3}):
+            self.assertRaises(SaltMasterUnresolvableError,
+                              salt.minion.resolve_dns, __opts__)
+
+
+@skipIf(NO_MOCK, NO_MOCK_REASON)
+class MinionAsyncTestCase(TestCase, AdaptedConfigurationTestCaseMixin, tornado.testing.AsyncTestCase):
+
+    @skip_if_not_root
+    def test_sock_path_len(self):
+        '''
+        This tests whether or not a larger hash causes the sock path to exceed
+        the system's max sock path length. See the below link for more
+        information.
+
+        https://github.com/saltstack/salt/issues/12172#issuecomment-43903643
+        '''
+        opts = {
+            'id': 'salt-testing',
+            'hash_type': 'sha512',
+            'sock_dir': os.path.join(salt.syspaths.SOCK_DIR, 'minion'),
+            'extension_modules': ''
+        }
+        with patch.dict(__opts__, opts):
+            try:
+                event_publisher = event.AsyncEventPublisher(__opts__)
+                result = True
+            except ValueError:
+                #  There are rare cases where we operate a closed socket, especially in containers.
+                # In this case, don't fail the test because we'll catch it down the road.
+                result = True
+            except SaltSystemExit:
+                result = False
+        self.assertTrue(result)

@@ -81,7 +81,8 @@ class Schedule(object):
                 cleanup=None,
                 proxy=None,
                 standalone=False,
-                new_instance=False):
+                new_instance=False,
+                utils=None):
         '''
         Only create one instance of Schedule
         '''
@@ -96,7 +97,8 @@ class Schedule(object):
                                         intervals=intervals,
                                         cleanup=cleanup,
                                         proxy=proxy,
-                                        standalone=standalone)
+                                        standalone=standalone,
+                                        utils=utils)
             if new_instance is True:
                 return instance
             cls.instance = instance
@@ -111,14 +113,23 @@ class Schedule(object):
                  cleanup=None,
                  proxy=None,
                  standalone=False,
-                 new_instance=False):
+                 new_instance=False,
+                 utils=None):
         pass
 
     # an init for the singleton instance to call
-    def __singleton_init__(self, opts, functions, returners=None, intervals=None, cleanup=None, proxy=None, standalone=False):
+    def __singleton_init__(self, opts,
+                           functions,
+                           returners=None,
+                           intervals=None,
+                           cleanup=None,
+                           proxy=None,
+                           standalone=False,
+                           utils=None):
         self.opts = opts
         self.proxy = proxy
         self.functions = functions
+        self.utils = utils or salt.loader.utils(opts)
         self.standalone = standalone
         self.skip_function = None
         self.skip_during_range = None
@@ -603,9 +614,9 @@ class Schedule(object):
             # context data that could keep paretns connections. ZeroMQ will
             # hang on polling parents connections from the child process.
             if self.opts['__role'] == 'master':
-                self.functions = salt.loader.runner(self.opts)
+                self.functions = salt.loader.runner(self.opts, utils=self.utils)
             else:
-                self.functions = salt.loader.minion_mods(self.opts, proxy=self.proxy)
+                self.functions = salt.loader.minion_mods(self.opts, proxy=self.proxy, utils=self.utils)
             self.returners = salt.loader.returners(self.opts, self.functions, proxy=self.proxy)
         ret = {'id': self.opts.get('id', 'master'),
                'fun': func,
@@ -720,6 +731,7 @@ class Schedule(object):
                     for global_key, value in six.iteritems(func_globals):
                         self.functions[mod_name].__globals__[global_key] = value
 
+            self.functions.pack['__context__']['retcode'] = 0
             ret['return'] = self.functions[func](*args, **kwargs)
 
             if not self.standalone:
@@ -771,11 +783,13 @@ class Schedule(object):
                 else:
                     # Send back to master so the job is included in the job list
                     mret = ret.copy()
-                    mret['jid'] = 'req'
-                    if data.get('return_job') == 'nocache':
-                        # overwrite 'req' to signal to master that
-                        # this job shouldn't be stored
-                        mret['jid'] = 'nocache'
+                    # No returners defined, so we're only sending back to the master
+                    if not data_returner and not self.schedule_returner:
+                        mret['jid'] = 'req'
+                        if data.get('return_job') == 'nocache':
+                            # overwrite 'req' to signal to master that
+                            # this job shouldn't be stored
+                            mret['jid'] = 'nocache'
                     load = {'cmd': '_return', 'id': self.opts['id']}
                     for key, value in six.iteritems(mret):
                         load[key] = value
@@ -1297,6 +1311,12 @@ class Schedule(object):
             else:
                 data['run'] = True
 
+        def _chop_ms(dt):
+            '''
+            Remove the microseconds from a datetime object
+            '''
+            return dt - datetime.timedelta(microseconds=dt.microsecond)
+
         schedule = self._get_schedule()
         if not isinstance(schedule, dict):
             raise ValueError('Schedule must be of type dict.')
@@ -1322,6 +1342,7 @@ class Schedule(object):
             # Clear these out between runs
             for item in ['_continue',
                          '_error',
+                         '_skipped',
                          '_skip_reason']:
                 if item in data:
                     del data[item]
@@ -1417,7 +1438,7 @@ class Schedule(object):
             if '_error' in data and data['_error']:
                 continue
 
-            seconds = int((data['_next_fire_time'] - now).total_seconds())
+            seconds = int((_chop_ms(data['_next_fire_time']) - _chop_ms(now)).total_seconds())
 
             # If there is no job specific splay available,
             # grab the global which defaults to None.
@@ -1550,45 +1571,54 @@ class Schedule(object):
                            'by {0} seconds)'.format(abs(seconds))
 
             try:
-                # Job is disabled, continue
-                if 'enabled' in data and not data['enabled']:
-                    log.debug('Job: %s is disabled', job_name)
-                    data['_skip_reason'] = 'disabled'
-                    data['_skipped_time'] = now
-                    data['_skipped'] = True
-                    continue
+                if run:
+                    # Job is disabled, continue
+                    if 'enabled' in data and not data['enabled']:
+                        log.debug('Job: %s is disabled', job_name)
+                        data['_skip_reason'] = 'disabled'
+                        data['_skipped_time'] = now
+                        data['_skipped'] = True
+                        continue
 
-                if 'jid_include' not in data or data['jid_include']:
-                    data['jid_include'] = True
-                    log.debug('schedule: Job %s was scheduled with jid_include, '
-                              'adding to cache (jid_include defaults to True)',
-                              job_name)
-                    if 'maxrunning' in data:
-                        log.debug('schedule: Job %s was scheduled with a max '
-                                  'number of %s', job_name, data['maxrunning'])
-                    else:
-                        log.info('schedule: maxrunning parameter was not specified for '
-                                 'job %s, defaulting to 1.', job_name)
-                        data['maxrunning'] = 1
+                    if 'jid_include' not in data or data['jid_include']:
+                        data['jid_include'] = True
+                        log.debug('schedule: Job %s was scheduled with jid_include, '
+                                  'adding to cache (jid_include defaults to True)',
+                                  job_name)
+                        if 'maxrunning' in data:
+                            log.debug('schedule: Job %s was scheduled with a max '
+                                      'number of %s', job_name, data['maxrunning'])
+                        else:
+                            log.info('schedule: maxrunning parameter was not specified for '
+                                     'job %s, defaulting to 1.', job_name)
+                            data['maxrunning'] = 1
 
-                if not self.standalone:
-                    data['run'] = run
-                    data = self._check_max_running(func,
-                                                   data,
-                                                   self.opts,
-                                                   now)
-                    run = data['run']
+                    if not self.standalone:
+                        data['run'] = run
+                        data = self._check_max_running(func,
+                                                       data,
+                                                       self.opts,
+                                                       now)
+                        run = data['run']
 
+                # Check run again, just in case _check_max_running
+                # set run to False
                 if run:
                     log.info('Running scheduled job: %s%s', job_name, miss_msg)
                     self._run_job(func, data)
+
             finally:
                 # Only set _last_run if the job ran
                 if run:
                     data['_last_run'] = now
                     data['_splay'] = None
                 if '_seconds' in data:
-                    data['_next_fire_time'] = now + datetime.timedelta(seconds=data['_seconds'])
+                    if self.standalone:
+                        data['_next_fire_time'] = now + datetime.timedelta(seconds=data['_seconds'])
+                    elif '_skipped' in data and data['_skipped']:
+                        data['_next_fire_time'] = now + datetime.timedelta(seconds=data['_seconds'])
+                    elif run:
+                        data['_next_fire_time'] = now + datetime.timedelta(seconds=data['_seconds'])
 
     def _run_job(self, func, data):
         job_dry_run = data.get('dry_run', False)
@@ -1612,6 +1642,8 @@ class Schedule(object):
             self.functions = {}
             returners = self.returners
             self.returners = {}
+            utils = self.utils
+            self.utils = {}
 
         try:
             if multiprocessing_enabled:
@@ -1634,6 +1666,7 @@ class Schedule(object):
                 # Restore our function references.
                 self.functions = functions
                 self.returners = returners
+                self.utils = utils
 
 
 def clean_proc_dir(opts):

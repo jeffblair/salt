@@ -349,9 +349,10 @@ def present(name,
             # Only add to the changes dict if layers were pulled
             ret['changes'] = image_update
 
+    error = False
+
     try:
         __salt__['docker.inspect_image'](full_image)
-        error = False
     except CommandExecutionError as exc:
         msg = exc.__str__()
         if '404' not in msg:
@@ -502,6 +503,15 @@ def absent(name=None, images=None, force=False):
 
 
 def mod_watch(name, sfun=None, **kwargs):
+    '''
+    The docker_image  watcher, called to invoke the watch command.
+
+    .. note::
+        This state exists to support special handling of the ``watch``
+        :ref:`requisite <requisites>`. It should not be called directly.
+
+        Parameters for this function should be set by the state being triggered.
+    '''
     if sfun == 'present':
         # Force image to be updated
         kwargs['force'] = True

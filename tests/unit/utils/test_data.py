@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 _b = lambda x: x.encode('utf-8')
 _s = lambda x: salt.utils.stringutils.to_str(x, normalize=True)
 # Some randomized data that will not decode
-BYTES = b'\x9c\xb1\xf7\xa3'
+BYTES = b'1\x814\x10'
+
 # This is an example of a unicode string with й constructed using two separate
 # code points. Do not modify it.
 EGGS = '\u044f\u0438\u0306\u0446\u0430'
@@ -142,6 +143,36 @@ class DataTestCase(TestCase):
                 test_three_level_dict, 'a:*:c:v'
             )
         )
+
+    def test_subdict_match_with_wildcards(self):
+        '''
+        Tests subdict matching when wildcards are used in the expression
+        '''
+        data = {
+            'a': {
+                'b': {
+                    'ç': 'd',
+                    'é': ['eff', 'gee', '8ch'],
+                    'ĩ': {'j': 'k'}
+                }
+            }
+        }
+        assert salt.utils.data.subdict_match(data, '*:*:*:*')
+        assert salt.utils.data.subdict_match(data, 'a:*:*:*')
+        assert salt.utils.data.subdict_match(data, 'a:b:*:*')
+        assert salt.utils.data.subdict_match(data, 'a:b:ç:*')
+        assert salt.utils.data.subdict_match(data, 'a:b:*:d')
+        assert salt.utils.data.subdict_match(data, 'a:*:ç:d')
+        assert salt.utils.data.subdict_match(data, '*:b:ç:d')
+        assert salt.utils.data.subdict_match(data, '*:*:ç:d')
+        assert salt.utils.data.subdict_match(data, '*:*:*:d')
+        assert salt.utils.data.subdict_match(data, 'a:*:*:d')
+        assert salt.utils.data.subdict_match(data, 'a:b:*:ef*')
+        assert salt.utils.data.subdict_match(data, 'a:b:*:g*')
+        assert salt.utils.data.subdict_match(data, 'a:b:*:j:*')
+        assert salt.utils.data.subdict_match(data, 'a:b:*:j:k')
+        assert salt.utils.data.subdict_match(data, 'a:b:*:*:k')
+        assert salt.utils.data.subdict_match(data, 'a:b:*:*:*')
 
     def test_traverse_dict(self):
         test_two_level_dict = {'foo': {'bar': 'baz'}}

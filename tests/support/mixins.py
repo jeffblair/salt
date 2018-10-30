@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 '''
-    :codeauthor: :email:`Pedro Algarvio (pedro@algarvio.me)`
+    :codeauthor: Pedro Algarvio (pedro@algarvio.me)
 
     =============
     Class Mix-Ins
@@ -39,6 +39,7 @@ import salt.utils.stringutils
 import salt.utils.yaml
 import salt.version
 import salt.exceptions
+import salt.utils.process
 from salt.utils.verify import verify_env
 from salt.utils.immutabletypes import freeze
 from salt._compat import ElementTree as etree
@@ -101,7 +102,6 @@ class AdaptedConfigurationTestCaseMixin(object):
                     os.path.join(rdict['pki_dir'], 'minions_rejected'),
                     os.path.join(rdict['pki_dir'], 'minions_denied'),
                     os.path.join(rdict['cachedir'], 'jobs'),
-                    os.path.join(rdict['cachedir'], 'raet'),
                     os.path.join(rdict['cachedir'], 'tokens'),
                     os.path.join(rdict['root_dir'], 'cache', 'tokens'),
                     os.path.join(rdict['pki_dir'], 'accepted'),
@@ -170,9 +170,13 @@ class AdaptedConfigurationTestCaseMixin(object):
                 )
         return RUNTIME_VARS.RUNTIME_CONFIGS[config_for]
 
-    @staticmethod
-    def get_config_dir():
+    @property
+    def config_dir(self):
         return RUNTIME_VARS.TMP_CONF_DIR
+
+    def get_config_dir(self):
+        log.warning('Use the config_dir attribute instead of calling get_config_dir()')
+        return self.config_dir
 
     @staticmethod
     def get_config_file_path(filename):
@@ -254,23 +258,23 @@ class ShellCaseCommonTestsMixin(CheckShellBinaryNameAndVersionMixin):
         git = salt.utils.path.which('git')
         if not git:
             self.skipTest('The git binary is not available')
-
+        opts = {
+            'stdout': subprocess.PIPE,
+            'stderr': subprocess.PIPE,
+            'cwd': CODE_DIR,
+        }
+        if not salt.utils.platform.is_windows():
+            opts['close_fds'] = True
         # Let's get the output of git describe
         process = subprocess.Popen(
             [git, 'describe', '--tags', '--first-parent', '--match', 'v[0-9]*'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-            cwd=CODE_DIR
+            **opts
         )
         out, err = process.communicate()
         if process.returncode != 0:
             process = subprocess.Popen(
                 [git, 'describe', '--tags', '--match', 'v[0-9]*'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                close_fds=True,
-                cwd=CODE_DIR
+                **opts
             )
             out, err = process.communicate()
         if not out:
@@ -638,6 +642,29 @@ class SaltReturnAssertsMixin(object):
             self.assertNotEqual(saltret, comparison)
 
 
+def _fetch_events(q):
+    '''
+    Collect events and store them
+    '''
+    def _clean_queue():
+        print('Cleaning queue!')
+        while not q.empty():
+            queue_item = q.get()
+            queue_item.task_done()
+
+    atexit.register(_clean_queue)
+    a_config = AdaptedConfigurationTestCaseMixin()
+    event = salt.utils.event.get_event('minion', sock_dir=a_config.get_config('minion')['sock_dir'], opts=a_config.get_config('minion'))
+    while True:
+        try:
+            events = event.get_event(full=False)
+        except Exception:
+            # This is broad but we'll see all kinds of issues right now
+            # if we drop the proc out from under the socket while we're reading
+            pass
+        q.put(events)
+
+
 class SaltMinionEventAssertsMixin(object):
     '''
     Asserts to verify that a given event was seen
@@ -646,35 +673,14 @@ class SaltMinionEventAssertsMixin(object):
     def __new__(cls, *args, **kwargs):
         # We have to cross-call to re-gen a config
         cls.q = multiprocessing.Queue()
-        cls.fetch_proc = multiprocessing.Process(target=cls._fetch, args=(cls.q,))
+        cls.fetch_proc = salt.utils.process.SignalHandlingMultiprocessingProcess(
+            target=_fetch_events, args=(cls.q,)
+        )
         cls.fetch_proc.start()
         return object.__new__(cls)
 
     def __exit__(self, *args, **kwargs):
         self.fetch_proc.join()
-
-    @staticmethod
-    def _fetch(q):
-        '''
-        Collect events and store them
-        '''
-        def _clean_queue():
-            print('Cleaning queue!')
-            while not q.empty():
-                queue_item = q.get()
-                queue_item.task_done()
-
-        atexit.register(_clean_queue)
-        a_config = AdaptedConfigurationTestCaseMixin()
-        event = salt.utils.event.get_event('minion', sock_dir=a_config.get_config('minion')['sock_dir'], opts=a_config.get_config('minion'))
-        while True:
-            try:
-                events = event.get_event(full=False)
-            except Exception:
-                # This is broad but we'll see all kinds of issues right now
-                # if we drop the proc out from under the socket while we're reading
-                pass
-            q.put(events)
 
     def assertMinionEventFired(self, tag):
         #TODO

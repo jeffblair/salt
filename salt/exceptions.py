@@ -96,6 +96,12 @@ class SaltSyndicMasterError(SaltException):
     '''
 
 
+class SaltMasterUnresolvableError(SaltException):
+    '''
+    Problem resolving the name of the Salt master
+    '''
+
+
 class MasterExit(SystemExit):
     '''
     Rise when the master exits
@@ -553,4 +559,10 @@ class VMwareVmRegisterError(VMwareSaltError):
 class VMwareVmCreationError(VMwareSaltError):
     '''
     Used when a configuration parameter is incorrect
+    '''
+
+
+class MissingSmb(SaltException):
+    '''
+    Raised when no smb library is found.
     '''
